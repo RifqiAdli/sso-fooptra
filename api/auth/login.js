@@ -9,7 +9,7 @@ const supabase = createClient(
 module.exports = async (req, res) => {
   // Set CORS headers
   res.setHeader('Access-Control-Allow-Credentials', true);
-  res.setHeader('Access-Control-Allow-Origin', '*'); // Update with your domain in production
+  res.setHeader('Access-Control-Allow-Origin', 'fooptra.com'); // Update with your domain in production
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 

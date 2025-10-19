@@ -23,10 +23,19 @@ module.exports = async (req, res) => {
   try {
     const { id } = req.query;
 
+    // Validate user ID
     if (!id) {
       return res.status(400).json({ 
         error: 'User ID is required',
         example: '/api/public/users/[user-id]'
+      });
+    }
+
+    // Validate UUID format (if using UUID)
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(id)) {
+      return res.status(400).json({ 
+        error: 'Invalid user ID format' 
       });
     }
 
@@ -54,40 +63,62 @@ module.exports = async (req, res) => {
         return res.status(404).json({ error: 'User not found' });
       }
       console.error('Profile error:', profileError);
-      return res.status(500).json({ error: 'Failed to fetch profile' });
+      return res.status(500).json({ 
+        error: 'Failed to fetch profile',
+        details: process.env.NODE_ENV === 'development' ? profileError.message : undefined
+      });
     }
 
+    // Safe access to nested settings
+    const isProfileVisible = profile?.settings?.privacy?.profile_visible ?? false;
+    const showOnLeaderboard = profile?.settings?.privacy?.show_on_leaderboard ?? false;
+
     // Check if profile is public
-    if (!profile.settings?.privacy?.profile_visible) {
+    if (!isProfileVisible) {
       return res.status(403).json({ 
         error: 'This profile is private' 
       });
     }
 
-    // Get user achievements
-    const { data: achievements } = await supabase
+    // Get user achievements (with error handling)
+    const { data: achievements, error: achievementsError } = await supabase
       .from('achievements')
       .select('id, badge_name, badge_type, unlocked_at')
       .eq('user_id', id)
       .order('unlocked_at', { ascending: false })
       .limit(10);
 
-    // Get recent waste logs (if user opted in)
-    const { data: recentLogs } = await supabase
+    if (achievementsError) {
+      console.error('Achievements error:', achievementsError);
+    }
+
+    // Get recent waste logs (with error handling)
+    const { data: recentLogs, error: logsError } = await supabase
       .from('waste_logs')
       .select('id, category, quantity, date, created_at')
       .eq('user_id', id)
       .order('date', { ascending: false })
       .limit(5);
 
+    if (logsError) {
+      console.error('Recent logs error:', logsError);
+    }
+
     // Calculate statistics
-    const { data: stats } = await supabase
+    const { data: stats, error: statsError } = await supabase
       .from('waste_logs')
       .select('quantity, category')
       .eq('user_id', id);
 
+    if (statsError) {
+      console.error('Stats error:', statsError);
+    }
+
     const totalWasteLogs = stats?.length || 0;
-    const totalWasteQuantity = stats?.reduce((sum, log) => sum + log.quantity, 0) || 0;
+    const totalWasteQuantity = stats?.reduce((sum, log) => {
+      const quantity = parseFloat(log.quantity) || 0;
+      return sum + quantity;
+    }, 0) || 0;
 
     // Remove sensitive settings before returning
     const { settings, ...publicProfile } = profile;
@@ -97,13 +128,13 @@ module.exports = async (req, res) => {
       profile: {
         ...publicProfile,
         privacy: {
-          profile_visible: settings?.privacy?.profile_visible || false,
-          show_on_leaderboard: settings?.privacy?.show_on_leaderboard || false
+          profile_visible: isProfileVisible,
+          show_on_leaderboard: showOnLeaderboard
         }
       },
       statistics: {
         total_waste_logs: totalWasteLogs,
-        total_waste_quantity: totalWasteQuantity,
+        total_waste_quantity: parseFloat(totalWasteQuantity.toFixed(2)),
         achievements_count: achievements?.length || 0
       },
       achievements: achievements || [],
@@ -112,6 +143,9 @@ module.exports = async (req, res) => {
 
   } catch (error) {
     console.error('Get user profile error:', error);
-    return res.status(500).json({ error: 'Internal server error' });
+    return res.status(500).json({ 
+      error: 'Internal server error',
+      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong'
+    });
   }
 };
