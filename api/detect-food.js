@@ -1,9 +1,10 @@
 // api/detect-food.js
-// Deploy this to: sso.fooptra.com
+// Deploy to: sso.fooptra.com/api/detect-food
 const formidable = require('formidable');
 const fs = require('fs');
 const axios = require('axios');
 
+// Next.js API configuration
 export const config = {
   api: {
     bodyParser: false,
@@ -71,61 +72,92 @@ const estimateQuantity = (bbox, imageWidth, imageHeight) => {
   return Math.round(Math.min(maxQuantity, Math.max(minQuantity, quantity)));
 };
 
-module.exports = async (req, res) => {
+// Main handler
+export default async function handler(req, res) {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
+  // Handle preflight
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
   if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
+    return res.status(405).json({ 
+      success: false,
+      error: 'Method not allowed. Use POST.' 
+    });
   }
 
   let tempFilePath = null;
 
   try {
-    // Parse multipart form data
+    console.log('📸 Starting food detection...');
+
+    // Parse multipart form data with formidable v3 syntax
     const form = formidable({ 
-      multiples: false,
       maxFileSize: 10 * 1024 * 1024, // 10MB max
+      keepExtensions: true,
     });
 
-    const [fields, files] = await new Promise((resolve, reject) => {
-      form.parse(req, (err, fields, files) => {
-        if (err) reject(err);
-        else resolve([fields, files]);
+    // Parse form - formidable v3 returns promise
+    let fields, files;
+    try {
+      [fields, files] = await form.parse(req);
+    } catch (parseError) {
+      console.error('Formidable parse error:', parseError);
+      return res.status(400).json({ 
+        success: false,
+        error: 'Failed to parse uploaded image',
+        details: parseError.message
       });
-    });
+    }
 
-    const imageFile = files.image;
+    // Get image file (handle both array and single file)
+    const imageFile = Array.isArray(files.image) ? files.image[0] : files.image;
     
     if (!imageFile) {
+      console.error('No image file found. Files:', files);
       return res.status(400).json({ 
-        error: 'No image provided',
-        success: false 
+        success: false,
+        error: 'No image provided. Please upload an image file.'
       });
     }
 
     tempFilePath = imageFile.filepath;
+    console.log('📂 Image file received:', tempFilePath);
+
+    // Check if file exists
+    if (!fs.existsSync(tempFilePath)) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Image file not found after upload'
+      });
+    }
 
     // Read image as base64
     const imageBuffer = fs.readFileSync(tempFilePath);
     const base64Image = imageBuffer.toString('base64');
+    console.log('🔄 Image converted to base64:', (base64Image.length / 1024).toFixed(2), 'KB');
 
-    console.log('Sending to Roboflow API...');
-
-    // Call Roboflow API
+    // Get API credentials
     const ROBOFLOW_API_KEY = process.env.ROBOFLOW_API_KEY;
     const ROBOFLOW_MODEL = process.env.ROBOFLOW_MODEL || 'food-detection-ysgqf/2';
 
     if (!ROBOFLOW_API_KEY) {
-      throw new Error('ROBOFLOW_API_KEY not configured');
+      console.error('❌ ROBOFLOW_API_KEY not configured');
+      return res.status(500).json({
+        success: false,
+        error: 'API configuration error. Please contact administrator.',
+        details: 'ROBOFLOW_API_KEY not set'
+      });
     }
 
+    console.log('🚀 Calling Roboflow API...');
+
+    // Call Roboflow API
     const roboflowResponse = await axios({
       method: 'POST',
       url: `https://detect.roboflow.com/${ROBOFLOW_MODEL}`,
@@ -138,20 +170,25 @@ module.exports = async (req, res) => {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
       },
+      timeout: 30000, // 30 second timeout
     });
 
     const predictions = roboflowResponse.data.predictions || [];
     const imageWidth = roboflowResponse.data.image?.width || 640;
     const imageHeight = roboflowResponse.data.image?.height || 640;
 
-    console.log(`Detected ${predictions.length} objects`);
+    console.log(`✅ Detected ${predictions.length} objects from Roboflow`);
 
     // Process predictions
     const items = predictions
       .filter(pred => {
         // Filter out non-food items and low confidence
         const category = categorizeFoodYOLO(pred.class);
-        return category !== 'Other' && pred.confidence > 0.3;
+        const isValid = category !== 'Other' && pred.confidence > 0.3;
+        if (!isValid) {
+          console.log(`⚠️  Filtered out: ${pred.class} (confidence: ${pred.confidence})`);
+        }
+        return isValid;
       })
       .map(pred => {
         const bbox = {
@@ -177,9 +214,12 @@ module.exports = async (req, res) => {
         };
       });
 
+    console.log(`✅ Processed ${items.length} valid food items`);
+
     // Clean up temp file
     if (tempFilePath && fs.existsSync(tempFilePath)) {
       fs.unlinkSync(tempFilePath);
+      console.log('🗑️  Cleaned up temp file');
     }
 
     return res.status(200).json({
@@ -193,22 +233,40 @@ module.exports = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Food detection error:', error);
+    console.error('❌ Food detection error:', error);
 
     // Clean up temp file on error
     if (tempFilePath && fs.existsSync(tempFilePath)) {
       try {
         fs.unlinkSync(tempFilePath);
+        console.log('🗑️  Cleaned up temp file after error');
       } catch (cleanupError) {
         console.error('Cleanup error:', cleanupError);
       }
     }
 
-    return res.status(500).json({
+    // Handle specific errors
+    let errorMessage = 'Failed to detect food items';
+    let statusCode = 500;
+
+    if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+      errorMessage = 'Request timeout. Image processing took too long.';
+      statusCode = 504;
+    } else if (error.response) {
+      // Roboflow API error
+      errorMessage = `Roboflow API error: ${error.response.statusText}`;
+      statusCode = error.response.status;
+      console.error('Roboflow error response:', error.response.data);
+    } else if (error.code === 'ENOTFOUND') {
+      errorMessage = 'Cannot connect to Roboflow API';
+      statusCode = 503;
+    }
+
+    return res.status(statusCode).json({
       success: false,
-      error: 'Failed to detect food items',
+      error: errorMessage,
       message: error.message,
       details: process.env.NODE_ENV === 'development' ? error.stack : undefined,
     });
   }
-};
+}
