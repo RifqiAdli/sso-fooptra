@@ -1,8 +1,6 @@
 // api/detect-food.js
-// Vercel-compatible version without formidable
-const axios = require('axios');
+import axios from 'axios';
 
-// Disable body parser for raw body access
 export const config = {
   api: {
     bodyParser: {
@@ -57,7 +55,6 @@ const categorizeFoodYOLO = (label) => {
   return 'Other';
 };
 
-// Estimate quantity
 const estimateQuantity = (bbox, imageWidth, imageHeight) => {
   const relativeArea = (bbox.width / imageWidth) * (bbox.height / imageHeight);
   const minQuantity = 50;
@@ -66,57 +63,6 @@ const estimateQuantity = (bbox, imageWidth, imageHeight) => {
   return Math.round(Math.min(maxQuantity, Math.max(minQuantity, quantity)));
 };
 
-// Parse multipart form data manually
-const parseMultipartForm = async (req) => {
-  return new Promise((resolve, reject) => {
-    const boundary = req.headers['content-type']?.split('boundary=')[1];
-    
-    if (!boundary) {
-      return reject(new Error('No boundary found in content-type'));
-    }
-
-    let data = [];
-    
-    req.on('data', chunk => {
-      data.push(chunk);
-    });
-    
-    req.on('end', () => {
-      try {
-        const buffer = Buffer.concat(data);
-        const parts = buffer.toString('binary').split(`--${boundary}`);
-        
-        let imageData = null;
-        
-        for (const part of parts) {
-          if (part.includes('Content-Disposition') && part.includes('name="image"')) {
-            // Extract binary data after headers
-            const dataStartIndex = part.indexOf('\r\n\r\n') + 4;
-            const dataEndIndex = part.lastIndexOf('\r\n');
-            
-            if (dataStartIndex > 3 && dataEndIndex > dataStartIndex) {
-              const binaryData = part.substring(dataStartIndex, dataEndIndex);
-              imageData = Buffer.from(binaryData, 'binary');
-              break;
-            }
-          }
-        }
-        
-        if (!imageData) {
-          return reject(new Error('No image data found'));
-        }
-        
-        resolve(imageData);
-      } catch (error) {
-        reject(error);
-      }
-    });
-    
-    req.on('error', reject);
-  });
-};
-
-// Main handler
 export default async function handler(req, res) {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -136,27 +82,8 @@ export default async function handler(req, res) {
 
   try {
     console.log('📸 Starting food detection...');
-    console.log('Content-Type:', req.headers['content-type']);
 
-    // Parse multipart form
-    let imageBuffer;
-    try {
-      imageBuffer = await parseMultipartForm(req);
-      console.log('✅ Image parsed, size:', (imageBuffer.length / 1024).toFixed(2), 'KB');
-    } catch (parseError) {
-      console.error('Parse error:', parseError);
-      return res.status(400).json({
-        success: false,
-        error: 'Failed to parse image',
-        details: parseError.message
-      });
-    }
-
-    // Convert to base64
-    const base64Image = imageBuffer.toString('base64');
-    console.log('🔄 Converted to base64');
-
-    // Get API credentials
+    // Check for API key first
     const ROBOFLOW_API_KEY = process.env.ROBOFLOW_API_KEY;
     const ROBOFLOW_MODEL = process.env.ROBOFLOW_MODEL || 'food-detection-ysgqf/2';
 
@@ -164,10 +91,25 @@ export default async function handler(req, res) {
       console.error('❌ ROBOFLOW_API_KEY not set');
       return res.status(500).json({
         success: false,
-        error: 'API not configured. Please set ROBOFLOW_API_KEY.',
+        error: 'API not configured. Please set ROBOFLOW_API_KEY in Vercel environment variables.',
       });
     }
 
+    // Get base64 image from request body
+    let base64Image;
+    
+    if (typeof req.body === 'string') {
+      base64Image = req.body;
+    } else if (req.body.image) {
+      base64Image = req.body.image;
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: 'No image data provided. Send base64 image in request body.',
+      });
+    }
+
+    console.log('✅ Image received, size:', (base64Image.length / 1024).toFixed(2), 'KB');
     console.log('🚀 Calling Roboflow API...');
 
     // Call Roboflow
@@ -245,12 +187,14 @@ export default async function handler(req, res) {
     } else if (error.response) {
       errorMessage = `Roboflow API error: ${error.response.statusText}`;
       statusCode = error.response.status;
+      console.error('Roboflow response:', error.response.data);
     }
 
     return res.status(statusCode).json({
       success: false,
       error: errorMessage,
       message: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
     });
   }
 }
