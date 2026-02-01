@@ -1,11 +1,12 @@
 // api/detect-food.js
+import formidable from 'formidable';
+import fs from 'fs';
 import axios from 'axios';
 
+// Disable Next.js body parser
 export const config = {
   api: {
-    bodyParser: {
-      sizeLimit: '10mb',
-    },
+    bodyParser: false,
   },
 };
 
@@ -83,7 +84,7 @@ export default async function handler(req, res) {
   try {
     console.log('📸 Starting food detection...');
 
-    // Check for API key first
+    // Check API key
     const ROBOFLOW_API_KEY = process.env.ROBOFLOW_API_KEY;
     const ROBOFLOW_MODEL = process.env.ROBOFLOW_MODEL || 'food-detection-ysgqf/2';
 
@@ -91,25 +92,40 @@ export default async function handler(req, res) {
       console.error('❌ ROBOFLOW_API_KEY not set');
       return res.status(500).json({
         success: false,
-        error: 'API not configured. Please set ROBOFLOW_API_KEY in Vercel environment variables.',
+        error: 'API not configured. Please set ROBOFLOW_API_KEY.',
       });
     }
 
-    // Get base64 image from request body
-    let base64Image;
+    // Parse form with formidable
+    const form = formidable({
+      maxFileSize: 10 * 1024 * 1024, // 10MB
+      keepExtensions: true,
+    });
+
+    const [fields, files] = await new Promise((resolve, reject) => {
+      form.parse(req, (err, fields, files) => {
+        if (err) reject(err);
+        else resolve([fields, files]);
+      });
+    });
+
+    const imageFile = files.image?.[0] || files.image;
     
-    if (typeof req.body === 'string') {
-      base64Image = req.body;
-    } else if (req.body.image) {
-      base64Image = req.body.image;
-    } else {
+    if (!imageFile) {
       return res.status(400).json({
         success: false,
-        error: 'No image data provided. Send base64 image in request body.',
+        error: 'No image file provided',
       });
     }
 
-    console.log('✅ Image received, size:', (base64Image.length / 1024).toFixed(2), 'KB');
+    console.log('✅ Image received:', imageFile.originalFilename, 
+      `(${(imageFile.size / 1024).toFixed(2)} KB)`);
+
+    // Read and convert to base64
+    const imageBuffer = fs.readFileSync(imageFile.filepath);
+    const base64Image = imageBuffer.toString('base64');
+    
+    console.log('🔄 Converted to base64');
     console.log('🚀 Calling Roboflow API...');
 
     // Call Roboflow
@@ -165,6 +181,9 @@ export default async function handler(req, res) {
 
     console.log(`✅ Processed ${items.length} food items`);
 
+    // Clean up temp file
+    fs.unlinkSync(imageFile.filepath);
+
     return res.status(200).json({
       success: true,
       items: items,
@@ -194,7 +213,6 @@ export default async function handler(req, res) {
       success: false,
       error: errorMessage,
       message: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
     });
   }
 }
